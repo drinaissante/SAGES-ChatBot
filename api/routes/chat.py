@@ -8,6 +8,8 @@ from api.utils.security import get_user_id_from_auth, supabase
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 gemini_client = genai.Client()
+
+# Paste your official local script generated store ID here
 ADMIN_STORE_ID = "fileSearchStores/sagesglobaladminsyllabus-sifzorl1hb4b"
 
 class ChatMessage(BaseModel):
@@ -18,8 +20,9 @@ class ChatPayload(BaseModel):
     message: str
     history: List[ChatMessage] = []
 
-@router.post("") # Maps directly to /api/chat
+@router.post("")
 async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id_from_auth)):
+    # 1. Fetch user container ID from Supabase
     db_query = supabase.table("user_vector_stores").select("user_store_id").eq("user_id", user_id).execute()
     user_private_store = db_query.data[0].get("user_store_id") if db_query.data else None
 
@@ -34,8 +37,8 @@ async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id
 
     tools_config = [types.Tool(file_search=types.FileSearch(file_search_store_names=authorized_stores))]
     
-    # Ordered fallback cascade tier
-    candidate_models = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-1.5-flash"]
+    # 2. DEFINED CASCADE TIER: All models below feature immense free-tier capacities
+    candidate_models = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
     
     for idx, model_name in enumerate(candidate_models):
         try:
@@ -45,20 +48,25 @@ async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id
                 config=types.GenerateContentConfig(tools=tools_config)
             )
             response = chat.send_message(payload.message)
+            
+            # Return successfully when an active model answers
             return {"reply": response.text, "model_used": model_name}
             
         except (errors.APIError, errors.ClientError) as e:
-            # Check the HTTP status code directly
             status_code = getattr(e, 'status_code', None)
             
-            # CRITICAL OPTIMIZATION: Only transition models if the error is an operational rate limit/server issue
-            if status_code in [429, 503] and idx < len(candidate_models) - 1:
-                print(f"[Fallback Triggered]: {model_name} rate limited/busy. Shifting to {candidate_models[idx+1]}")
+            # Check for either a 429 Quota Exhaustion or a 503 Server Busy exception
+            is_transient_error = status_code in [429, 503] or any(
+                term in str(e).upper() for term in ["QUOTA", "EXHAUSTED", "UNAVAILABLE", "OVERLOADED"]
+            )
+            
+            # If the error is transient and fallback models are remaining, continue the loop
+            if is_transient_error and idx < len(candidate_models) - 1:
+                print(f"⚠️ [503/429 Fallback Triggered]: {model_name} busy. Shifting to {candidate_models[idx+1]}")
                 continue
             else:
-                # If it's a 400 bad request (Invalid Store ID), fail instantly instead of stalling for 1 minute
+                # Break and report immediately if all options fail or the payload itself is malformed
                 raise HTTPException(
                     status_code=status_code or 500, 
-                    detail=f"RAG Execution aborted. Google API returned: {str(e)}"
+                    detail=f"Chat pipeline failed. Underlying Google API Error: {str(e)}"
                 )
-
