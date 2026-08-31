@@ -16,7 +16,6 @@ class ChatMessage(BaseModel):
     role: str
     text: str
 
-# OPTIMIZATION: Accept user_store_id from the frontend payload
 class ChatPayload(BaseModel):
     message: str
     user_store_id: Optional[str] = None  
@@ -26,13 +25,9 @@ class ChatPayload(BaseModel):
 async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id_from_auth)):
     user_private_store = payload.user_store_id
 
-    # FAST ROUTE CACHE: Only query Supabase if the frontend didn't pass a cached ID
     if not user_private_store:
-        print("💾 Cache Miss: Querying Supabase for user store ID...")
         db_query = supabase.table("user_vector_stores").select("user_store_id").eq("user_id", user_id).execute()
-        user_private_store = db_query.data[0].get("user_store_id") if db_query.data else None
-    else:
-        print("⚡ Cache Hit: Reusing user store ID from frontend...")
+        user_private_store = db_query.data.get("user_store_id") if db_query.data else None
 
     authorized_stores = [ADMIN_STORE_ID]
     if user_private_store:
@@ -46,27 +41,34 @@ async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id
     tools_config = [types.Tool(file_search=types.FileSearch(file_search_store_names=authorized_stores))]
     candidate_models = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 
+    # INNER GENERATOR FUNCTION
     async def response_streamer():
         for idx, model_name in enumerate(candidate_models):
             try:
-                response_chunks = gemini_client.chats.create_stream(
+                # 1. First, create the standard base chat session instance
+                chat = gemini_client.chats.create(
                     model=model_name,
                     history=formatted_history,
-                    config=types.GenerateContentConfig(tools=tools_config),
-                    message=payload.message
+                    config=types.GenerateContentConfig(tools=tools_config)
                 )
                 
-                for chunk in response_chunks:
+                # 2. FIX: Invoke streaming explicitly using send_message_stream
+                response_stream = chat.send_message_stream(payload.message)
+                
+                # 3. Pull chunks from the generator object block
+                for chunk in response_stream:
                     if chunk.text:
                         yield chunk.text
-                return 
+                return  # Terminate generator successfully
                 
             except (errors.APIError, errors.ClientError) as e:
                 status_code = getattr(e, 'status_code', None)
-                is_transient = status_code in [429, 503] or "QUOTA" in str(e).upper() or "UNAVAILABLE" in str(e).upper()
+                is_transient = status_code in [429, 503] or any(
+                    term in str(e).upper() for term in ["QUOTA", "EXHAUSTED", "UNAVAILABLE", "OVERLOADED"]
+                )
                 
                 if is_transient and idx < len(candidate_models) - 1:
-                    print(f"⚠️ Streaming Fallback: Shifting from {model_name}")
+                    print(f"⚠️ [Stream Fallback]: {model_name} busy. Shifting next...")
                     continue
                 else:
                     yield f"⚠️ Stream Generation Aborted: {str(e)}"
