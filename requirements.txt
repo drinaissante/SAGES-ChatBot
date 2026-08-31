@@ -3,3 +3,4 @@ pydantic
 supabase
 google-genai
 python-multipart
+uvicorn
