@@ -2,3 +2,4 @@ fastapi
 pydantic
 supabase
 google-genai
+python-multipart
