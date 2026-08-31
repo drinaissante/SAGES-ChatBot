@@ -45,8 +45,17 @@ async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id
             chat = gemini_client.chats.create(
                 model=model_name,
                 history=formatted_history,
-                config=types.GenerateContentConfig(tools=tools_config)
+                config=types.GenerateContentConfig(
+                    tools=tools_config,
+                    
+                    system_instruction=(
+                        "You are SAGES, a helpful academic tutor. When presenting schedules, "
+                        "grading breakdowns, timelines, or tabular syllabus details, "
+                        "you MUST format them using standard markdown tables."
+                    )
+                )
             )
+
             response = chat.send_message(payload.message)
             
             # Return successfully when an active model answers
