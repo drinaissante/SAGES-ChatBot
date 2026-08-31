@@ -1,5 +1,6 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
@@ -8,8 +9,6 @@ from api.utils.security import get_user_id_from_auth, supabase
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 gemini_client = genai.Client()
-
-# Paste your official local script generated store ID here
 ADMIN_STORE_ID = "fileSearchStores/sagesglobaladminsyllabus-sifzorl1hb4b"
 
 class ChatMessage(BaseModel):
@@ -22,9 +21,8 @@ class ChatPayload(BaseModel):
 
 @router.post("")
 async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id_from_auth)):
-    # 1. Fetch user container ID from Supabase
     db_query = supabase.table("user_vector_stores").select("user_store_id").eq("user_id", user_id).execute()
-    user_private_store = db_query.data[0].get("user_store_id") if db_query.data else None
+    user_private_store = db_query.data.get("user_store_id") if db_query.data else None
 
     authorized_stores = [ADMIN_STORE_ID]
     if user_private_store:
@@ -36,46 +34,36 @@ async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id
     ]
 
     tools_config = [types.Tool(file_search=types.FileSearch(file_search_store_names=authorized_stores))]
-    
-    # 2. DEFINED CASCADE TIER: All models below feature immense free-tier capacities
     candidate_models = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
-    
-    for idx, model_name in enumerate(candidate_models):
-        try:
-            chat = gemini_client.chats.create(
-                model=model_name,
-                history=formatted_history,
-                config=types.GenerateContentConfig(
-                    tools=tools_config,
-                    
-                    system_instruction=(
-                        "You are SAGES, a helpful academic tutor. When presenting schedules, "
-                        "grading breakdowns, timelines, or tabular syllabus details, "
-                        "you MUST format them using standard markdown tables."
-                    )
-                )
-            )
 
-            response = chat.send_message(payload.message)
-            
-            # Return successfully when an active model answers
-            return {"reply": response.text, "model_used": model_name}
-            
-        except (errors.APIError, errors.ClientError) as e:
-            status_code = getattr(e, 'status_code', None)
-            
-            # Check for either a 429 Quota Exhaustion or a 503 Server Busy exception
-            is_transient_error = status_code in [429, 503] or any(
-                term in str(e).upper() for term in ["QUOTA", "EXHAUSTED", "UNAVAILABLE", "OVERLOADED"]
-            )
-            
-            # If the error is transient and fallback models are remaining, continue the loop
-            if is_transient_error and idx < len(candidate_models) - 1:
-                print(f"⚠️ [503/429 Fallback Triggered]: {model_name} busy. Shifting to {candidate_models[idx+1]}")
-                continue
-            else:
-                # Break and report immediately if all options fail or the payload itself is malformed
-                raise HTTPException(
-                    status_code=status_code or 500, 
-                    detail=f"Chat pipeline failed. Underlying Google API Error: {str(e)}"
+    # INNER GENERATOR FUNCTION: Streams text blocks out one by one
+    async def response_streamer():
+        for idx, model_name in enumerate(candidate_models):
+            try:
+                # CORRECTION: Shifted from .create() to .create_stream()
+                response_chunks = gemini_client.chats.create_stream(
+                    model=model_name,
+                    history=formatted_history,
+                    config=types.GenerateContentConfig(tools=tools_config),
+                    message=payload.message # Send message during generation initialization
                 )
+                
+                # Loop through the stream generator chunks from Google
+                for chunk in response_chunks:
+                    if chunk.text:
+                        yield chunk.text
+                return # Break generator successfully once finished
+                
+            except (errors.APIError, errors.ClientError) as e:
+                status_code = getattr(e, 'status_code', None)
+                is_transient = status_code in [429, 503] or "QUOTA" in str(e).upper() or "UNAVAILABLE" in str(e).upper()
+                
+                if is_transient and idx < len(candidate_models) - 1:
+                    print(f"Streaming Fallback: Shifting from {model_name}")
+                    continue
+                else:
+                    yield f"⚠️ Stream Generation Aborted: {str(e)}"
+                    return
+
+    # Return standard event-stream protocol format back to Vercel gateway
+    return StreamingResponse(response_streamer(), media_type="text/event-stream")
