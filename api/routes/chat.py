@@ -48,13 +48,17 @@ async def chat_with_rag(payload: ChatPayload, user_id: str = Depends(get_user_id
             return {"reply": response.text, "model_used": model_name}
             
         except (errors.APIError, errors.ClientError) as e:
-            # Check if this error is specifically caused by quota exhaustion or rate limits
-            is_quota_error = any(term in str(e).upper() for term in ["429", "QUOTA", "EXHAUSTED", "LIMIT"])
+            # Check the HTTP status code directly
+            status_code = getattr(e, 'status_code', None)
             
-            if is_quota_error and idx < len(candidate_models) - 1:
-                # Log to runtime server log and fall back to the next model in the list
-                print(f"[Fallback Triggered]: {model_name} exhausted. Shifting to {candidate_models[idx+1]}")
+            # CRITICAL OPTIMIZATION: Only transition models if the error is an operational rate limit/server issue
+            if status_code in [429, 503] and idx < len(candidate_models) - 1:
+                print(f"[Fallback Triggered]: {model_name} rate limited/busy. Shifting to {candidate_models[idx+1]}")
                 continue
             else:
-                # Re-raise error if we have exhausted all models or encountered a non-quota error
-                raise HTTPException(status_code=502, detail=f"All failover layers exhausted. API Error: {str(e)}")
+                # If it's a 400 bad request (Invalid Store ID), fail instantly instead of stalling for 1 minute
+                raise HTTPException(
+                    status_code=status_code or 500, 
+                    detail=f"RAG Execution aborted. Google API returned: {str(e)}"
+                )
+
