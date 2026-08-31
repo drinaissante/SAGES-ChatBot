@@ -8,7 +8,7 @@ from api.utils.security import get_user_id_from_auth, supabase
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 gemini_client = genai.Client()
-ADMIN_STORE_ID = "fileSearchStores/global-syllabus-abc"
+ADMIN_STORE_ID = "fileSearchStores/sagesglobaladminsyllabus-sifzorl1hb4b"
 
 class ChatMessage(BaseModel):
     role: str
