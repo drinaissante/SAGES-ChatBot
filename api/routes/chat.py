@@ -6,7 +6,7 @@ from google.genai import types
 from google.genai import errors
 from api.utils.security import get_user_id_from_auth, supabase
 
-router = APIRouter(prefix="/api/chat", tags=["Chat"])
+router = APIRouter(prefix="/chat", tags=["Chat"])
 gemini_client = genai.Client()
 ADMIN_STORE_ID = "fileSearchStores/global-syllabus-abc"
 

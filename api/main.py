@@ -14,5 +14,5 @@ app.add_middleware(
 )
 
 # Mount your modular router controllers
-app.include_router(chat.router)
-app.include_router(upload.router)
+app.include_router(chat.router, prefix="/api")
+app.include_router(upload.router, prefix="/api")

@@ -5,7 +5,7 @@ from google import genai
 from google.genai import types
 from api.utils.security import get_user_id_from_auth, supabase
 
-router = APIRouter(prefix="/api/upload", tags=["Upload"])
+router = APIRouter(prefix="/upload", tags=["Upload"])
 gemini_client = genai.Client()
 
 @router.post("")  
